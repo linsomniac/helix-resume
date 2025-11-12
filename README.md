@@ -29,7 +29,7 @@ To build:
     git clone https://github.com/linsomniac/helix-resume.git
     cd helix-resume
     git switch resume
-    cargo install --path helix-term --locked
+    cargo build --release
     HELIX_RUNTIME=src/helix/runtime target/release/hx
 
 
