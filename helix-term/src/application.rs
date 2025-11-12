@@ -79,6 +79,8 @@ pub struct Application {
     lsp_progress: LspProgressMap,
 
     theme_mode: Option<theme::Mode>,
+    // Allow triggering multiple subsequent reloads
+    full_redraw_counter: u8,
 }
 
 #[cfg(feature = "integration")]
@@ -207,15 +209,22 @@ impl Application {
                         // NOTE: this isn't necessarily true anymore. If
                         // `--vsplit` or `--hsplit` are used, the file which is
                         // opened last is focused on.
-                        let view_id = editor.tree.focus;
-                        let doc = doc_mut!(editor, &doc_id);
-                        let selection = pos
-                            .into_iter()
-                            .map(|coords| {
-                                Range::point(pos_at_coords(doc.text().slice(..), coords, true))
-                            })
-                            .collect();
-                        doc.set_selection(view_id, selection);
+
+                        // Only set the position if it was explicitly provided by the user
+                        // (not the default position). This allows file position restoration
+                        // to work when no position is specified on the command line.
+                        let has_explicit_position = pos.iter().any(|p| p.row != 0 || p.col != 0);
+                        if has_explicit_position {
+                            let view_id = editor.tree.focus;
+                            let doc = doc_mut!(editor, &doc_id);
+                            let selection = pos
+                                .into_iter()
+                                .map(|coords| {
+                                    Range::point(pos_at_coords(doc.text().slice(..), coords, true))
+                                })
+                                .collect();
+                            doc.set_selection(view_id, selection);
+                        }
                     }
                 }
 
@@ -265,12 +274,27 @@ impl Application {
             jobs,
             lsp_progress: LspProgressMap::new(),
             theme_mode,
+            full_redraw_counter: 0,
         };
 
         Ok(app)
     }
 
     async fn render(&mut self) {
+        // Check if editor needs a full redraw (e.g., after position restoration)
+        if self.editor.needs_full_redraw {
+            self.compositor.need_full_redraw();
+            self.editor.needs_full_redraw = false;
+            // Set counter to force next few renders to also be full
+            self.full_redraw_counter = 3;
+        }
+
+        // Force full redraw if counter is active (for subsequent renders after a clear)
+        if self.full_redraw_counter > 0 {
+            self.compositor.need_full_redraw();
+            self.full_redraw_counter -= 1;
+        }
+
         if self.compositor.full_redraw {
             self.terminal.clear().expect("Cannot clear the terminal");
             self.compositor.full_redraw = false;
@@ -295,6 +319,7 @@ impl Application {
         let surface = self.terminal.current_buffer_mut();
 
         self.compositor.render(area, surface, &mut cx);
+
         let (pos, kind) = self.compositor.cursor(area, &self.editor);
         // reset cursor cache
         self.editor.cursor_cache.reset();
@@ -637,6 +662,29 @@ impl Application {
 
         self.editor
             .set_doc_path(doc_save_event.doc_id, &doc_save_event.path);
+
+        // After successful save, update the saved cursor position
+        let position_data = if let Some(doc) = self.editor.document(doc_save_event.doc_id) {
+            if let Some(path) = doc.path() {
+                // Find the view for this document
+                if let Some((view, _)) = self.editor.tree.views().find(|(v, _)| v.doc == doc_save_event.doc_id) {
+                    let selection = doc.selection(view.id).clone();
+                    let text = doc.text().clone();
+                    Some((path.clone(), selection, text))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((path, selection, text)) = position_data {
+            let _ = self.editor.file_info_db.save_position(&path, &selection, &text);
+        }
+
         // TODO: fix being overwritten by lsp
         self.editor.set_status(format!(
             "'{}' written, {lines}L {size}",
@@ -1278,6 +1326,9 @@ impl Application {
         //        errors along the way
         let mut errs = Vec::new();
 
+        // Save all open file positions before closing
+        self.save_file_info_positions();
+
         if let Err(err) = self
             .jobs
             .finish(&mut self.editor, Some(&mut self.compositor))
@@ -1300,5 +1351,18 @@ impl Application {
         }
 
         errs
+    }
+
+    fn save_file_info_positions(&mut self) {
+        for (doc_id, doc) in &self.editor.documents {
+            if let Some(path) = doc.path() {
+                // Find view for this document
+                if let Some((view, _)) = self.editor.tree.views().find(|(v, _)| v.doc == *doc_id) {
+                    let selection = doc.selection(view.id);
+                    let text = doc.text();
+                    let _ = self.editor.file_info_db.save_position(path, selection, text);
+                }
+            }
+        }
     }
 }

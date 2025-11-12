@@ -5,6 +5,7 @@ use crate::{
         DocumentOpenError, DocumentSavedEventFuture, DocumentSavedEventResult, Mode, SavePoint,
     },
     events::{DocumentDidClose, DocumentDidOpen, DocumentFocusLost},
+    file_info::FileInfoDb,
     graphics::{CursorKind, Rect},
     handlers::Handlers,
     info::Info,
@@ -14,7 +15,7 @@ use crate::{
     tree::{self, Tree},
     Document, DocumentId, View, ViewId,
 };
-use helix_event::dispatch;
+use helix_event::{dispatch, request_redraw};
 use helix_vcs::DiffProviderRegistry;
 
 use futures_util::stream::select_all::SelectAll;
@@ -427,6 +428,8 @@ pub struct Config {
     pub rainbow_brackets: bool,
     /// Whether to enable Kitty Keyboard Protocol
     pub kitty_keyboard_protocol: KittyKeyboardProtocolConfig,
+    /// Save and restore file positions
+    pub save_file_info: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Clone, Copy)]
@@ -1118,6 +1121,7 @@ impl Default for Config {
             editor_config: true,
             rainbow_brackets: false,
             kitty_keyboard_protocol: Default::default(),
+            save_file_info: false,
         }
     }
 }
@@ -1203,6 +1207,8 @@ pub struct Editor {
 
     pub config_events: (UnboundedSender<ConfigEvent>, UnboundedReceiver<ConfigEvent>),
     pub needs_redraw: bool,
+    /// Indicates that a full terminal clear and redraw is needed (e.g. after position restoration)
+    pub needs_full_redraw: bool,
     /// Cached position of the cursor calculated during rendering.
     /// The content of `cursor_cache` is returned by `Editor::cursor` if
     /// set to `Some(_)`. The value will be cleared after it's used.
@@ -1219,6 +1225,7 @@ pub struct Editor {
 
     pub mouse_down_range: Option<Range>,
     pub cursor_cache: CursorCache,
+    pub file_info_db: FileInfoDb,
 }
 
 pub type Motion = Box<dyn Fn(&mut Editor)>;
@@ -1337,9 +1344,11 @@ impl Editor {
             exit_code: 0,
             config_events: unbounded_channel(),
             needs_redraw: false,
+            needs_full_redraw: false,
             handlers,
             mouse_down_range: None,
             cursor_cache: CursorCache::default(),
+            file_info_db: FileInfoDb::new(conf.save_file_info),
         }
     }
 
@@ -1704,6 +1713,29 @@ impl Editor {
         view.sync_changes(doc);
         doc.mark_as_focused();
 
+        // Restore saved position if available
+        if let Some(path) = doc.path() {
+            if let Some(position) = self.file_info_db.load_position(path) {
+                // Create selection at saved position
+                let text = doc.text().slice(..);
+                let coords = helix_core::Position::new(position.line, position.column);
+                // Clamp to valid position in case file changed
+                let pos = helix_core::pos_at_coords(text, coords, true);
+                let selection = helix_core::Selection::point(pos);
+
+                doc.set_selection(view.id, selection);
+                crate::align_view(doc, view, crate::Align::Center);
+                view.ensure_cursor_in_view(doc, scrolloff);
+                request_redraw();
+
+                // Set needs_redraw flag directly as well
+                self.needs_redraw = true;
+                self.needs_full_redraw = true;
+
+                return;
+            }
+        }
+
         view.ensure_cursor_in_view(doc, scrolloff)
     }
 
@@ -1722,6 +1754,13 @@ impl Editor {
         let focust_lost = match action {
             Action::Replace => {
                 let (view, doc) = current_ref!(self);
+                // Save position of the document we're switching away from
+                if let Some(path) = doc.path() {
+                    let selection = doc.selection(view.id);
+                    let text = doc.text();
+                    let _ = self.file_info_db.save_position(path, selection, text);
+                }
+
                 // If the current view is an empty scratch buffer and is not displayed in any other views, delete it.
                 // Boolean value is determined before the call to `view_mut` because the operation requires a borrow
                 // of `self.tree`, which is mutably borrowed when `view_mut` is called.
@@ -1777,12 +1816,38 @@ impl Editor {
             }
             Action::Load => {
                 let view_id = view!(self).id;
+                let scrolloff = self.config().scrolloff;
                 let doc = doc_mut!(self, &id);
                 doc.ensure_view_init(view_id);
                 doc.mark_as_focused();
+
+                // Restore saved position if available
+                if let Some(path) = doc.path() {
+                    if let Some(position) = self.file_info_db.load_position(path) {
+                        // Create selection at saved position
+                        let text = doc.text().slice(..);
+                        let coords = helix_core::Position::new(position.line, position.column);
+                        // Clamp to valid position in case file changed
+                        let pos = helix_core::pos_at_coords(text, coords, true);
+                        let selection = helix_core::Selection::point(pos);
+
+                        doc.set_selection(view_id, selection);
+
+                        let view = self.tree.get(view_id);
+                        crate::align_view(doc, view, crate::Align::Center);
+                        view.ensure_cursor_in_view(doc, scrolloff);
+                        request_redraw();
+
+                        // Set needs_redraw flag directly as well
+                        self.needs_redraw = true;
+                        self.needs_full_redraw = true;
+                    }
+                }
+
                 return;
             }
             Action::HorizontalSplit | Action::VerticalSplit => {
+                let scrolloff = self.config().scrolloff;
                 let focus_lost = self.tree.try_get(self.tree.focus).map(|view| view.doc);
                 // copy the current view, unless there is no view yet
                 let view = self
@@ -1803,6 +1868,30 @@ impl Editor {
                 let doc = doc_mut!(self, &id);
                 doc.ensure_view_init(view_id);
                 doc.mark_as_focused();
+
+                // Restore saved position if available (for newly opened files)
+                if let Some(path) = doc.path() {
+                    if let Some(position) = self.file_info_db.load_position(path) {
+                        // Create selection at saved position
+                        let text = doc.text().slice(..);
+                        let coords = helix_core::Position::new(position.line, position.column);
+                        // Clamp to valid position in case file changed
+                        let pos = helix_core::pos_at_coords(text, coords, true);
+                        let selection = helix_core::Selection::point(pos);
+
+                        doc.set_selection(view_id, selection);
+
+                        let view = self.tree.get(view_id);
+                        crate::align_view(doc, view, crate::Align::Center);
+                        view.ensure_cursor_in_view(doc, scrolloff);
+                        request_redraw();
+
+                        // Set needs_redraw flag directly as well
+                        self.needs_redraw = true;
+                        self.needs_full_redraw = true;
+                    }
+                }
+
                 focus_lost
             }
         };
@@ -1913,6 +2002,33 @@ impl Editor {
     }
 
     pub fn close(&mut self, id: ViewId) {
+        // If this is the last view, save all positions before closing
+        if self.tree.views().count() == 1 {
+            // Collect the position data first to avoid borrow checker issues
+            let positions_to_save: Vec<(PathBuf, helix_core::Selection, helix_core::Rope)> =
+                self.documents
+                    .iter()
+                    .filter_map(|(doc_id, doc)| {
+                        if let Some(path) = doc.path() {
+                            if let Some((view, _)) = self.tree.views().find(|(v, _)| v.doc == *doc_id) {
+                                let selection = doc.selection(view.id).clone();
+                                let text = doc.text().clone();
+                                Some((path.to_path_buf(), selection, text))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+            // Now save the positions
+            for (path, selection, text) in positions_to_save {
+                let _ = self.file_info_db.save_position(&path, &selection, &text);
+            }
+        }
+
         // Remove selections for the closed view on all documents.
         for doc in self.documents_mut() {
             doc.remove_view(id);
@@ -1928,6 +2044,18 @@ impl Editor {
         };
         if !force && doc.is_modified() {
             return Err(CloseError::BufferModified(doc.display_name().into_owned()));
+        }
+
+        // Save position before closing
+        if let Some(doc) = self.documents.get(&doc_id) {
+            if let Some(path) = doc.path() {
+                // Find view for this document
+                if let Some((view, _)) = self.tree.views().find(|(v, _)| v.doc == doc_id) {
+                    let selection = doc.selection(view.id);
+                    let text = doc.text();
+                    let _ = self.file_info_db.save_position(path, selection, text);
+                }
+            }
         }
 
         // This will also disallow any follow-up writes
