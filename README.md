@@ -16,6 +16,14 @@
 
 </div>
 
+# Resume Patch
+
+This fork adds a feature to Helix that when re-editing a file takes you back to the position
+you were at when last editing the file.  To enable, add the following to your `~/.config/helix/config.toml`:
+
+    [editor]
+    save-file-info = true
+
 ![Screenshot](./screenshot.png)
 
 A [Kakoune](https://github.com/mawww/kakoune) / [Neovim](https://github.com/neovim/neovim) inspired editor, written in Rust.
