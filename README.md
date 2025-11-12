@@ -24,6 +24,15 @@ you were at when last editing the file.  To enable, add the following to your `~
     [editor]
     save-file-info = true
 
+To build:
+
+    git clone https://github.com/linsomniac/helix-resume.git
+    cd helix-resume
+    git switch resume
+    cargo build --release
+    HELIX_RUNTIME=src/helix/runtime target/release/hx
+
+
 ![Screenshot](./screenshot.png)
 
 A [Kakoune](https://github.com/mawww/kakoune) / [Neovim](https://github.com/neovim/neovim) inspired editor, written in Rust.
