@@ -21,8 +21,18 @@
 This fork adds a feature to Helix that when re-editing a file takes you back to the position
 you were at when last editing the file.  To enable, add the following to your `~/.config/helix/config.toml`:
 
+# Hard wrap Patch
+
+Setting "hard-wrap = true" will turn on the ability for helix to insert a newline in text as you are
+typing if you exceed the configured "text-width".
+
+# Example Config
+
     [editor]
     save-file-info = true
+    hard-wrap = true
+
+# Building and Running
 
 To build:
 
