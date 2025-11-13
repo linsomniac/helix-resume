@@ -1702,20 +1702,27 @@ impl Editor {
         }
     }
 
-    fn replace_document_in_view(&mut self, current_view: ViewId, doc_id: DocumentId) {
-        let scrolloff = self.config().scrolloff;
-        let view = self.tree.get_mut(current_view);
+    /// Restores the saved position for a document in a view if available.
+    /// Returns true if a position was restored, false otherwise.
+    ///
+    /// AIDEV-NOTE: Common function for restoring saved document positions,
+    /// used in replace_document_in_view and switch methods.
+    /// This function handles the document path lookup and position restoration logic.
+    fn restore_saved_position_for_doc(&mut self, doc_id: DocumentId, view_id: ViewId) -> bool {
+        // First get the path from the document
+        let doc_path = {
+            let doc = self.documents.get(&doc_id);
+            doc.and_then(|d| d.path().cloned())
+        };
 
-        view.doc = doc_id;
-        let doc = doc_mut!(self, &doc_id);
+        // If we have a path and a saved position, restore it
+        if let Some(path) = doc_path {
+            if let Some(position) = self.file_info_db.load_position(&path) {
+                // Get scrolloff before the doc_mut! macro to avoid borrow conflicts
+                let scrolloff = self.config().scrolloff;
 
-        doc.ensure_view_init(view.id);
-        view.sync_changes(doc);
-        doc.mark_as_focused();
+                let doc = doc_mut!(self, &doc_id);
 
-        // Restore saved position if available
-        if let Some(path) = doc.path() {
-            if let Some(position) = self.file_info_db.load_position(path) {
                 // Create selection at saved position
                 let text = doc.text().slice(..);
                 let coords = helix_core::Position::new(position.line, position.column);
@@ -1723,7 +1730,9 @@ impl Editor {
                 let pos = helix_core::pos_at_coords(text, coords, true);
                 let selection = helix_core::Selection::point(pos);
 
-                doc.set_selection(view.id, selection);
+                doc.set_selection(view_id, selection);
+
+                let view = self.tree.get(view_id);
                 crate::align_view(doc, view, crate::Align::Center);
                 view.ensure_cursor_in_view(doc, scrolloff);
                 request_redraw();
@@ -1732,10 +1741,31 @@ impl Editor {
                 self.needs_redraw = true;
                 self.needs_full_redraw = true;
 
-                return;
+                return true;
             }
         }
+        false
+    }
 
+    fn replace_document_in_view(&mut self, current_view: ViewId, doc_id: DocumentId) {
+        let scrolloff = self.config().scrolloff;
+        let view = self.tree.get_mut(current_view);
+
+        view.doc = doc_id;
+        let view_id = view.id;
+        let doc = doc_mut!(self, &doc_id);
+
+        doc.ensure_view_init(view_id);
+        view.sync_changes(doc);
+        doc.mark_as_focused();
+
+        // Restore saved position if available
+        if self.restore_saved_position_for_doc(doc_id, view_id) {
+            return;
+        }
+
+        let view = self.tree.get_mut(current_view);
+        let doc = doc_mut!(self, &doc_id);
         view.ensure_cursor_in_view(doc, scrolloff)
     }
 
@@ -1816,38 +1846,16 @@ impl Editor {
             }
             Action::Load => {
                 let view_id = view!(self).id;
-                let scrolloff = self.config().scrolloff;
                 let doc = doc_mut!(self, &id);
                 doc.ensure_view_init(view_id);
                 doc.mark_as_focused();
 
                 // Restore saved position if available
-                if let Some(path) = doc.path() {
-                    if let Some(position) = self.file_info_db.load_position(path) {
-                        // Create selection at saved position
-                        let text = doc.text().slice(..);
-                        let coords = helix_core::Position::new(position.line, position.column);
-                        // Clamp to valid position in case file changed
-                        let pos = helix_core::pos_at_coords(text, coords, true);
-                        let selection = helix_core::Selection::point(pos);
-
-                        doc.set_selection(view_id, selection);
-
-                        let view = self.tree.get(view_id);
-                        crate::align_view(doc, view, crate::Align::Center);
-                        view.ensure_cursor_in_view(doc, scrolloff);
-                        request_redraw();
-
-                        // Set needs_redraw flag directly as well
-                        self.needs_redraw = true;
-                        self.needs_full_redraw = true;
-                    }
-                }
+                self.restore_saved_position_for_doc(id, view_id);
 
                 return;
             }
             Action::HorizontalSplit | Action::VerticalSplit => {
-                let scrolloff = self.config().scrolloff;
                 let focus_lost = self.tree.try_get(self.tree.focus).map(|view| view.doc);
                 // copy the current view, unless there is no view yet
                 let view = self
@@ -1870,27 +1878,7 @@ impl Editor {
                 doc.mark_as_focused();
 
                 // Restore saved position if available (for newly opened files)
-                if let Some(path) = doc.path() {
-                    if let Some(position) = self.file_info_db.load_position(path) {
-                        // Create selection at saved position
-                        let text = doc.text().slice(..);
-                        let coords = helix_core::Position::new(position.line, position.column);
-                        // Clamp to valid position in case file changed
-                        let pos = helix_core::pos_at_coords(text, coords, true);
-                        let selection = helix_core::Selection::point(pos);
-
-                        doc.set_selection(view_id, selection);
-
-                        let view = self.tree.get(view_id);
-                        crate::align_view(doc, view, crate::Align::Center);
-                        view.ensure_cursor_in_view(doc, scrolloff);
-                        request_redraw();
-
-                        // Set needs_redraw flag directly as well
-                        self.needs_redraw = true;
-                        self.needs_full_redraw = true;
-                    }
-                }
+                self.restore_saved_position_for_doc(id, view_id);
 
                 focus_lost
             }
