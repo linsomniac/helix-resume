@@ -1,4 +1,4 @@
-use helix_core::{Selection, Transaction, SmartString};
+use helix_core::{Selection, Transaction, SmartString, indent};
 use helix_event::register_hook;
 use helix_view::handlers::Handlers;
 use helix_core::chars::char_is_whitespace;
@@ -7,12 +7,16 @@ use crate::events::PostInsertChar;
 
 pub(super) fn register_hooks(_handlers: &Handlers) {
     register_hook!(move |event: &mut PostInsertChar<'_, '_>| {
-        let config = &event.cx.editor.config();
+        let config = event.cx.editor.config();
 
         // Only proceed if wrap_when_typing is enabled
         if !config.wrap_when_typing {
             return Ok(());
         }
+
+        // Get config info we'll need for indentation before the mutable borrow
+        let indent_heuristic = config.indent_heuristic.clone();
+        let loader = event.cx.editor.syn_loader.load();
 
         let (view, doc) = current!(event.cx.editor);
         let text_width = doc.text_width();
@@ -90,9 +94,27 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         // Apply wrapping for all positions we found
         for (break_pos, next_char_pos) in wrap_positions {
             let text = doc.text();
+
+            // Calculate the indentation for the new line
+            let line_idx = text.char_to_line(break_pos);
+            let indent_str = indent::indent_for_newline(
+                &loader,
+                doc.syntax(),
+                &indent_heuristic,
+                &doc.indent_style,
+                doc.tab_width(),
+                text.slice(..),
+                line_idx,
+                break_pos,
+                line_idx,
+            );
+
+            // Create the new text with newline + indentation
+            let mut new_text = String::from("\n");
+            new_text.push_str(&indent_str);
+
             let transaction = Transaction::change_by_selection(text, &Selection::single(break_pos, next_char_pos), |range| {
-                let new_text = SmartString::from("\n");
-                (range.from(), range.to(), Some(new_text))
+                (range.from(), range.to(), Some(SmartString::from(new_text.as_str())))
             });
             doc.apply(&transaction, view.id);
         }
