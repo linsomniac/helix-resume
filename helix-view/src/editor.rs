@@ -337,7 +337,7 @@ pub struct Config {
     /// Set a global text_width
     pub text_width: usize,
     /// Automatically wrap text when typing exceeds text_width. Defaults to false.
-    pub wrap_when_typing: bool,
+    pub hard_wrap: bool,
     /// Time in milliseconds since last keypress before idle timers trigger.
     /// Used for various UI timeouts. Defaults to 250ms.
     #[serde(
@@ -1105,7 +1105,7 @@ impl Default for Config {
                 ..SoftWrap::default()
             },
             text_width: 80,
-            wrap_when_typing: false,
+            hard_wrap: false,
             completion_replace: false,
             continue_comments: true,
             workspace_lsp_roots: Vec::new(),
