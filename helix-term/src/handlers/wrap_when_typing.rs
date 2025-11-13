@@ -1,0 +1,89 @@
+use helix_core::{Selection, Transaction, SmartString};
+use helix_event::register_hook;
+use helix_view::handlers::Handlers;
+use helix_core::chars::char_is_whitespace;
+
+use crate::events::PostInsertChar;
+
+pub(super) fn register_hooks(_handlers: &Handlers) {
+    register_hook!(move |event: &mut PostInsertChar<'_, '_>| {
+        let config = &event.cx.editor.config();
+
+        // Only proceed if wrap_when_typing is enabled
+        if !config.wrap_when_typing {
+            return Ok(());
+        }
+
+        let (view, doc) = current!(event.cx.editor);
+        let text_width = doc.text_width();
+
+        // Get information about what lines need wrapping
+        let mut wrap_positions = Vec::new();
+        {
+            let text = doc.text();
+            let selection = doc.selection(view.id);
+
+            // Process each cursor position
+            for range in selection.ranges() {
+                let cursor_pos = range.cursor(text.slice(..));
+                let line_idx = text.char_to_line(cursor_pos);
+                let line_start = text.line_to_char(line_idx);
+                let line_end = if line_idx == text.len_lines() - 1 {
+                    text.len_chars()
+                } else {
+                    text.line_to_char(line_idx + 1) - 1  // Exclude newline
+                };
+
+                let line = text.slice(line_start..line_end);
+                let line_str = line.to_string();
+
+                // Check if line exceeds text_width
+                if line_str.chars().count() > text_width && text_width > 0 {
+                    // Find the last whitespace before or at text_width
+                    let mut last_space_idx = None;
+                    let mut char_count = 0;
+
+                    for (idx, ch) in line_str.char_indices() {
+                        char_count += 1;
+                        if char_count > text_width {
+                            break;
+                        }
+                        if char_is_whitespace(ch) {
+                            last_space_idx = Some(idx);
+                        }
+                    }
+
+                    // If we found a space to break at
+                    if let Some(space_idx) = last_space_idx {
+                        // Calculate the position in the document
+                        let break_pos = line_start + line_str[..space_idx].chars().count();
+
+                        // Skip any trailing whitespace after the break point
+                        let mut next_char_pos = break_pos + 1;
+                        while next_char_pos < line_end {
+                            let ch = text.char(next_char_pos);
+                            if !char_is_whitespace(ch) {
+                                break;
+                            }
+                            next_char_pos += 1;
+                        }
+
+                        wrap_positions.push((break_pos, next_char_pos));
+                    }
+                }
+            }
+        }
+
+        // Apply wrapping for all positions we found
+        for (break_pos, next_char_pos) in wrap_positions {
+            let text = doc.text();
+            let transaction = Transaction::change_by_selection(text, &Selection::single(break_pos, next_char_pos), |range| {
+                let new_text = SmartString::from("\n");
+                (range.from(), range.to(), Some(new_text))
+            });
+            doc.apply(&transaction, view.id);
+        }
+
+        Ok(())
+    });
+}
