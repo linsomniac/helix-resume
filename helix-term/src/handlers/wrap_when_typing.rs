@@ -40,21 +40,34 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
                 // Check if line exceeds text_width
                 if line_str.chars().count() > text_width && text_width > 0 {
                     // Find the last whitespace before or at text_width
-                    let mut last_space_idx = None;
+                    let mut last_space_before_width = None;
+                    let mut first_space_after_width = None;
                     let mut char_count = 0;
 
                     for (idx, ch) in line_str.char_indices() {
                         char_count += 1;
-                        if char_count > text_width {
-                            break;
-                        }
                         if char_is_whitespace(ch) {
-                            last_space_idx = Some(idx);
+                            if char_count <= text_width {
+                                last_space_before_width = Some(idx);
+                            } else if first_space_after_width.is_none() {
+                                // Found first space after text_width
+                                first_space_after_width = Some(idx);
+                                break; // We can stop searching
+                            }
                         }
                     }
 
+                    // Determine which space to use for wrapping
+                    let space_idx = if last_space_before_width.is_some() {
+                        last_space_before_width
+                    } else {
+                        // No space before width limit, use first space after (if any)
+                        // This handles the case where a single word exceeds text_width
+                        first_space_after_width
+                    };
+
                     // If we found a space to break at
-                    if let Some(space_idx) = last_space_idx {
+                    if let Some(space_idx) = space_idx {
                         // Calculate the position in the document
                         let break_pos = line_start + line_str[..space_idx].chars().count();
 
