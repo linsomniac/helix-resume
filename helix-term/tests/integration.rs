@@ -21,5 +21,6 @@ mod test {
     mod commands;
     mod languages;
     mod movement;
+    mod position_restore;
     mod splits;
 }

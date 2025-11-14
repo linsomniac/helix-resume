@@ -79,8 +79,6 @@ pub struct Application {
     lsp_progress: LspProgressMap,
 
     theme_mode: Option<theme::Mode>,
-    // Allow triggering multiple subsequent reloads
-    full_redraw_counter: u8,
 }
 
 #[cfg(feature = "integration")]
@@ -274,27 +272,12 @@ impl Application {
             jobs,
             lsp_progress: LspProgressMap::new(),
             theme_mode,
-            full_redraw_counter: 0,
         };
 
         Ok(app)
     }
 
     async fn render(&mut self) {
-        // Check if editor needs a full redraw (e.g., after position restoration)
-        if self.editor.needs_full_redraw {
-            self.compositor.need_full_redraw();
-            self.editor.needs_full_redraw = false;
-            // Set counter to force next few renders to also be full
-            self.full_redraw_counter = 3;
-        }
-
-        // Force full redraw if counter is active (for subsequent renders after a clear)
-        if self.full_redraw_counter > 0 {
-            self.compositor.need_full_redraw();
-            self.full_redraw_counter -= 1;
-        }
-
         if self.compositor.full_redraw {
             self.terminal.clear().expect("Cannot clear the terminal");
             self.compositor.full_redraw = false;

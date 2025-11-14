@@ -1210,8 +1210,6 @@ pub struct Editor {
 
     pub config_events: (UnboundedSender<ConfigEvent>, UnboundedReceiver<ConfigEvent>),
     pub needs_redraw: bool,
-    /// Indicates that a full terminal clear and redraw is needed (e.g. after position restoration)
-    pub needs_full_redraw: bool,
     /// Cached position of the cursor calculated during rendering.
     /// The content of `cursor_cache` is returned by `Editor::cursor` if
     /// set to `Some(_)`. The value will be cleared after it's used.
@@ -1347,7 +1345,6 @@ impl Editor {
             exit_code: 0,
             config_events: unbounded_channel(),
             needs_redraw: false,
-            needs_full_redraw: false,
             handlers,
             mouse_down_range: None,
             cursor_cache: CursorCache::default(),
@@ -1711,6 +1708,16 @@ impl Editor {
     /// AIDEV-NOTE: Common function for restoring saved document positions,
     /// used in replace_document_in_view and switch methods.
     /// This function handles the document path lookup and position restoration logic.
+    ///
+    /// AIDEV-NOTE: Fixed redraw issue by:
+    /// 1. Removing the hacky needs_full_redraw flag and full_redraw_counter mechanism
+    /// 2. Properly centering view with align_view
+    /// 3. Ensuring view initialization with ensure_view_init
+    /// 4. Using ensure_cursor_in_view_center for proper viewport calculation
+    ///
+    /// AIDEV-NOTE: Fixed multiple buffer issue by:
+    /// Only calling this function when opening a file that's not already open in another view.
+    /// This prevents views from jumping to each other's positions when switching between them.
     fn restore_saved_position_for_doc(&mut self, doc_id: DocumentId, view_id: ViewId) -> bool {
         // First get the path from the document
         let doc_path = {
@@ -1735,14 +1742,20 @@ impl Editor {
 
                 doc.set_selection(view_id, selection);
 
+                // First center the view on the cursor position
                 let view = self.tree.get(view_id);
                 crate::align_view(doc, view, crate::Align::Center);
-                view.ensure_cursor_in_view(doc, scrolloff);
-                request_redraw();
 
-                // Set needs_redraw flag directly as well
+                // Force the document to recalculate its viewport
+                doc.ensure_view_init(view_id);
+
+                // Ensure the cursor is visible with scrolloff
+                // Use ensure_cursor_in_view_center to force proper viewport calculation
+                view.ensure_cursor_in_view_center(doc, scrolloff);
+
+                // Mark that we need a redraw
                 self.needs_redraw = true;
-                self.needs_full_redraw = true;
+                request_redraw();
 
                 return true;
             }
@@ -1752,6 +1765,11 @@ impl Editor {
 
     fn replace_document_in_view(&mut self, current_view: ViewId, doc_id: DocumentId) {
         let scrolloff = self.config().scrolloff;
+
+        // Check if this document is already open in another view before we replace
+        let already_open = self.tree.views()
+            .any(|(view, _)| view.doc == doc_id && view.id != current_view);
+
         let view = self.tree.get_mut(current_view);
 
         view.doc = doc_id;
@@ -1762,8 +1780,8 @@ impl Editor {
         view.sync_changes(doc);
         doc.mark_as_focused();
 
-        // Restore saved position if available
-        if self.restore_saved_position_for_doc(doc_id, view_id) {
+        // Only restore saved position if this file is not already open in another view
+        if !already_open && self.restore_saved_position_for_doc(doc_id, view_id) {
             return;
         }
 
@@ -1849,17 +1867,31 @@ impl Editor {
             }
             Action::Load => {
                 let view_id = view!(self).id;
+
+                // Check if this document is already open in another view
+                let already_open = self.tree.views()
+                    .any(|(view, _)| view.doc == id && view.id != view_id);
+
                 let doc = doc_mut!(self, &id);
                 doc.ensure_view_init(view_id);
                 doc.mark_as_focused();
 
-                // Restore saved position if available
-                self.restore_saved_position_for_doc(id, view_id);
+                // Only restore saved position if this file is not already open in another view
+                // This prevents jumping to saved position when switching between existing views
+                if !already_open {
+                    self.restore_saved_position_for_doc(id, view_id);
+                }
 
                 return;
             }
             Action::HorizontalSplit | Action::VerticalSplit => {
                 let focus_lost = self.tree.try_get(self.tree.focus).map(|view| view.doc);
+
+                // Check if we're splitting from a view that already has this document
+                let splitting_same_doc = self.tree.try_get(self.tree.focus)
+                    .map(|v| v.doc == id)
+                    .unwrap_or(false);
+
                 // copy the current view, unless there is no view yet
                 let view = self
                     .tree
@@ -1880,8 +1912,11 @@ impl Editor {
                 doc.ensure_view_init(view_id);
                 doc.mark_as_focused();
 
-                // Restore saved position if available (for newly opened files)
-                self.restore_saved_position_for_doc(id, view_id);
+                // Only restore saved position if this is a newly opened file
+                // (not when splitting a view that already has this document)
+                if !splitting_same_doc {
+                    self.restore_saved_position_for_doc(id, view_id);
+                }
 
                 focus_lost
             }
